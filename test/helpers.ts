@@ -13,6 +13,11 @@ function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
 }
 
+/** Run a git command inside an existing fixture repo (branches, checkouts). */
+export function gitIn(dir: string, args: string[]): string {
+  return git(dir, args);
+}
+
 export interface BuiltRepo {
   dir: string;
   commits: string[];

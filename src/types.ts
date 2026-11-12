@@ -50,6 +50,9 @@ export interface Report {
   reportVersion: number;
   mappingVersion: number;
   base: string;
+  /** Commit the comparison actually ran from (merge-base of base and head).
+   *  Equals base when the base branch has not moved since the PR was cut. */
+  mergeBase: string;
   head: string;
   schemaPath: string | null;
   migrationsPath: string | null;

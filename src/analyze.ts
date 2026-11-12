@@ -38,6 +38,7 @@ function fatalReport(opts: AnalyzeOptions, fatal: string, warnings: string[]): R
     reportVersion: REPORT_VERSION,
     mappingVersion: MAPPING_VERSION,
     base: opts.base,
+    mergeBase: opts.base,
     head: opts.head,
     schemaPath: null,
     migrationsPath: null,
@@ -85,10 +86,28 @@ export async function analyzeRepo(opts: AnalyzeOptions): Promise<Report> {
     return fatalReport(opts, `head commit ${opts.head} not present in this clone`, warnings);
   }
 
+  // Compare from the merge-base: pr.base.sha moves forward as the base
+  // branch advances, and diffing from it would attribute unrelated base
+  // changes to this PR. Fail closed when it cannot be determined.
+  const mb = await git.mergeBase(opts.base, opts.head);
+  const mergeBase = mb.ok ? mb.value : null;
+  if (!mergeBase) {
+    return fatalReport(
+      opts,
+      `could not determine merge-base of ${opts.base.slice(0, 7)}..${opts.head.slice(0, 7)}${mb.ok ? '' : `: ${mb.error}`}${shallow ? ' (shallow checkout — set fetch-depth: 0)' : ''}`,
+      warnings,
+    );
+  }
+  if (mergeBase !== opts.base) {
+    warnings.push(
+      `base branch moved since this PR was cut; base-side comparison uses merge-base ${mergeBase.slice(0, 7)}`,
+    );
+  }
+
   // --- locate schema and migrations at BOTH revs: a PR can move them, and
   // base-side reads must resolve against the base tree, not head's layout. ---
   const schemaLocHead = await discoverSchema(git, opts.head, opts.schemaPath);
-  const schemaLocBase = await discoverSchema(git, opts.base, opts.schemaPath);
+  const schemaLocBase = await discoverSchema(git, mergeBase, opts.schemaPath);
   const schemaPath = schemaLocHead.ok ? schemaLocHead.value.path : null;
   const schemaPathBase = schemaLocBase.ok ? schemaLocBase.value.path : null;
   if (!schemaLocHead.ok) warnings.push(schemaLocHead.error);
@@ -99,7 +118,7 @@ export async function analyzeRepo(opts: AnalyzeOptions): Promise<Report> {
   const migrationsPath = await discoverMigrations(git, opts.head, opts.migrationsPath, schemaPath);
   const migrationsPathBase = await discoverMigrations(
     git,
-    opts.base,
+    mergeBase,
     opts.migrationsPath,
     schemaPathBase,
   );
@@ -122,14 +141,14 @@ export async function analyzeRepo(opts: AnalyzeOptions): Promise<Report> {
     if (phys.ok) warnings.push(...phys.value.warnings.map((w) => `schema at ${rev.slice(0, 7)}: ${w}`));
     return phys;
   };
-  const baseSchema = await loadAt(opts.base, schemaPathBase);
+  const baseSchema = await loadAt(mergeBase, schemaPathBase);
   const headSchema = await loadAt(opts.head, schemaPath);
 
   // --- find changed migration files ---
   const pathspec = migrationsPath ?? '';
-  const changed = await git.diffFiles(opts.base, opts.head, pathspec);
+  const changed = await git.diffFiles(mergeBase, opts.head, pathspec);
   if (!changed.ok) {
-    return fatalReport(opts, `could not diff ${opts.base}..${opts.head}: ${changed.error}`, warnings);
+    return fatalReport(opts, `could not diff ${mergeBase}..${opts.head}: ${changed.error}`, warnings);
   }
   const isMigrationFile = (p: string): boolean => {
     if (!p.endsWith('.sql')) return false;
@@ -170,12 +189,12 @@ export async function analyzeRepo(opts: AnalyzeOptions): Promise<Report> {
   // --- lazy history index ---
   let historyPromise: Promise<HistoryIndex> | null = null;
   const getHistory = () => {
-    if (!historyPromise) historyPromise = buildHistoryIndex(git, opts.base, historyPaths);
+    if (!historyPromise) historyPromise = buildHistoryIndex(git, mergeBase, historyPaths);
     return historyPromise;
   };
 
   const ctx: ClassifyContext = {
-    base: opts.base,
+    base: mergeBase,
     head: opts.head,
     baseSchema,
     headSchema,
@@ -209,6 +228,7 @@ export async function analyzeRepo(opts: AnalyzeOptions): Promise<Report> {
     reportVersion: REPORT_VERSION,
     mappingVersion: MAPPING_VERSION,
     base: opts.base,
+    mergeBase,
     head: opts.head,
     schemaPath,
     migrationsPath,

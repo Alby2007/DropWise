@@ -46,6 +46,14 @@ export function createGit(cwd: string) {
       const r = await runGit(cwd, ['cat-file', '-e', `${rev}^{commit}`]);
       return r.ok;
     },
+    /** Best common ancestor of two revs — the commit a PR was actually cut
+     *  from. Needed because pr.base.sha moves forward as the base branch
+     *  advances; diffing from it would include unrelated base changes. */
+    async mergeBase(a: string, b: string): Promise<Result<string>> {
+      const r = await runGit(cwd, ['merge-base', a, b]);
+      if (!r.ok) return r;
+      return { ok: true, value: r.value.trim() };
+    },
     async showFile(rev: string, path: string): Promise<Result<string>> {
       return runGit(cwd, ['show', `${rev}:${path}`]);
     },

@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { buildRepo, shallowClone, schema, mig, type BuiltRepo } from './helpers';
+import { buildRepo, shallowClone, schema, mig, gitIn, type BuiltRepo } from './helpers';
 import { FIXTURES } from './fixtures';
 import { analyzeRepo } from '../src/analyze';
 import { renderComment } from '../src/comment';
@@ -119,6 +119,74 @@ describe('fail-closed behaviour', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('merge-base comparison', () => {
+  it('base branch changes after the PR was cut do not count as PR changes', async () => {
+    // C0 (main): schema has legacy column. Feature branch drops it.
+    // Main then removes the field AND adds an unrelated `name` column.
+    // pr.base.sha = M1; the real PR base is merge-base C0.
+    const repo = track(
+      buildRepo([
+        {
+          files: {
+            'prisma/schema.prisma': schema(
+              'model Doc {\n  id Int @id\n  legacy String\n  email String\n}',
+            ),
+            ...mig(
+              '20240101_init',
+              'CREATE TABLE "Doc" ("id" SERIAL PRIMARY KEY, "legacy" TEXT, "email" TEXT);',
+            ),
+          },
+        },
+      ]),
+    );
+    const c0 = repo.commits[0];
+
+    gitIn(repo.dir, ['checkout', '-b', 'feature']);
+    writeFileSync(
+      path.join(repo.dir, 'prisma/schema.prisma'),
+      schema('model Doc {\n  id Int @id\n  email String\n}'),
+    );
+    mkdirSync(path.join(repo.dir, 'prisma/migrations/20240102_drop_legacy'), { recursive: true });
+    writeFileSync(
+      path.join(repo.dir, 'prisma/migrations/20240102_drop_legacy/migration.sql'),
+      'ALTER TABLE "Doc" DROP COLUMN "legacy";',
+    );
+    gitIn(repo.dir, ['add', '-A']);
+    gitIn(repo.dir, ['commit', '-m', 'drop legacy']);
+    const f1 = gitIn(repo.dir, ['rev-parse', 'HEAD']).trim();
+
+    gitIn(repo.dir, ['checkout', 'main']);
+    writeFileSync(
+      path.join(repo.dir, 'prisma/schema.prisma'),
+      schema('model Doc {\n  id Int @id\n  email String\n  name String\n}'),
+    );
+    mkdirSync(path.join(repo.dir, 'prisma/migrations/20240103_main_changes'), { recursive: true });
+    writeFileSync(
+      path.join(repo.dir, 'prisma/migrations/20240103_main_changes/migration.sql'),
+      'ALTER TABLE "Doc" ADD COLUMN "name" TEXT;',
+    );
+    gitIn(repo.dir, ['add', '-A']);
+    gitIn(repo.dir, ['commit', '-m', 'main moves: drop legacy field, add name']);
+    const m1 = gitIn(repo.dir, ['rev-parse', 'HEAD']).trim();
+
+    const report = await analyzeRepo({ cwd: repo.dir, base: m1, head: f1 });
+    expect(report.fatal).toBeUndefined();
+    expect(report.mergeBase).toBe(c0);
+    expect(
+      report.warnings.some((w) => w.includes('merge-base')),
+      'should note the base moved',
+    ).toBe(true);
+
+    // only the PR's own migration is analysed — not main's add_name migration
+    expect(report.migrations.map((m) => m.migration)).toEqual(['20240102_drop_legacy']);
+    const findings = report.migrations.flatMap((m) => m.findings);
+    expect(findings.map((f) => f.operation.column)).toEqual(['legacy']);
+    // relative to the merge-base the field IS removed by this PR; with a
+    // two-dot diff it would wrongly appear absent-from-base (PRIOR_*).
+    expect(verdictsOf(findings)).toEqual(['SAME_PR_REMOVAL']);
   });
 });
 
