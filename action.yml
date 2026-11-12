@@ -1,0 +1,52 @@
+name: dropwise
+description: >-
+  Reviews destructive Postgres migrations in Prisma projects and comments on
+  rollout risk. Non-blocking: reports evidence, never claims safety.
+author: dropwise
+branding:
+  icon: alert-triangle
+  color: orange
+inputs:
+  token:
+    description: GitHub token used to post the pull request comment
+    required: false
+    default: ${{ github.token }}
+  schema-path:
+    description: >-
+      Path to the Prisma schema (file or multi-file schema directory),
+      relative to the repository root. Auto-discovered when empty.
+    required: false
+    default: ''
+  migrations-path:
+    description: >-
+      Path to the Prisma migrations directory, relative to the repository
+      root. Defaults to a "migrations" directory next to the schema.
+    required: false
+    default: ''
+  zero-downtime-deploys:
+    description: >-
+      Set to 'false' if this service deploys atomically (no overlapping
+      versions). Verdicts are unchanged; the recommended action notes the
+      lower rolling-deployment hazard. Default assumes deploys may overlap.
+    required: false
+    default: 'true'
+  squawk-report:
+    description: >-
+      Optional path to a Squawk JSON report in the workspace. When set, its
+      findings are passed through in the comment. dropwise does not depend
+      on Squawk.
+    required: false
+    default: ''
+  json-output:
+    description: >-
+      Path where the machine-readable JSON report is written, relative to
+      the workspace. Useful for tests and downstream tooling.
+    required: false
+    default: 'dropwise-report.json'
+  comment:
+    description: Set to 'false' to skip posting the PR comment
+    required: false
+    default: 'true'
+runs:
+  using: node20
+  main: dist/index.js

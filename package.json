@@ -1,0 +1,27 @@
+{
+  "name": "dropwise",
+  "version": "0.1.0",
+  "description": "PR review tool that assesses rollout risk of destructive Postgres migrations in Prisma projects",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "scripts": {
+    "build": "ncc build src/index.ts -o dist --license licenses.txt && node scripts/postbuild.cjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "coverage": "vitest run && tsx scripts/coverage.ts"
+  },
+  "dependencies": {
+    "@actions/core": "^1.11.1",
+    "@actions/github": "^6.0.1",
+    "@prisma/internals": "^7.10.1",
+    "@prisma/internals6": "npm:@prisma/internals@^6.19.0",
+    "libpg-query": "^18.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@vercel/ncc": "^0.45.0",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.0",
+    "vitest": "^5.1.0"
+  }
+}
