@@ -85,28 +85,45 @@ export async function analyzeRepo(opts: AnalyzeOptions): Promise<Report> {
     return fatalReport(opts, `head commit ${opts.head} not present in this clone`, warnings);
   }
 
-  // --- locate schema and migrations at head ---
-  const schemaLoc = await discoverSchema(git, opts.head, opts.schemaPath);
-  let schemaPath: string | null = null;
-  if (schemaLoc.ok) schemaPath = schemaLoc.value.path;
-  else warnings.push(schemaLoc.error);
+  // --- locate schema and migrations at BOTH revs: a PR can move them, and
+  // base-side reads must resolve against the base tree, not head's layout. ---
+  const schemaLocHead = await discoverSchema(git, opts.head, opts.schemaPath);
+  const schemaLocBase = await discoverSchema(git, opts.base, opts.schemaPath);
+  const schemaPath = schemaLocHead.ok ? schemaLocHead.value.path : null;
+  const schemaPathBase = schemaLocBase.ok ? schemaLocBase.value.path : null;
+  if (!schemaLocHead.ok) warnings.push(schemaLocHead.error);
+  if (schemaPath && schemaPathBase && schemaPath !== schemaPathBase) {
+    warnings.push(`schema moved between base and head (${schemaPathBase} -> ${schemaPath})`);
+  }
 
   const migrationsPath = await discoverMigrations(git, opts.head, opts.migrationsPath, schemaPath);
+  const migrationsPathBase = await discoverMigrations(
+    git,
+    opts.base,
+    opts.migrationsPath,
+    schemaPathBase,
+  );
   if (!migrationsPath && opts.migrationsPath) {
     warnings.push(`configured migrations-path "${opts.migrationsPath}" not found at ${opts.head}`);
   }
+  const historyPaths = [...new Set([migrationsPath, migrationsPathBase].filter((p): p is string => !!p))];
+  if (migrationsPath && migrationsPathBase && migrationsPath !== migrationsPathBase) {
+    warnings.push(
+      `migrations directory moved between base and head (${migrationsPathBase} -> ${migrationsPath}); history searched under both`,
+    );
+  }
 
   // --- load schemas at both revs ---
-  const loadAt = async (rev: string): Promise<Result<PhysicalSchema>> => {
-    if (!schemaPath) return { ok: false, error: `no Prisma schema found at ${rev}` };
-    const text = await loadSchemaText(git, rev, schemaPath);
+  const loadAt = async (rev: string, path: string | null): Promise<Result<PhysicalSchema>> => {
+    if (!path) return { ok: false, error: `no Prisma schema found at ${rev}` };
+    const text = await loadSchemaText(git, rev, path);
     if (!text.ok) return text;
     const phys = await loadPhysicalSchema(text.value);
     if (phys.ok) warnings.push(...phys.value.warnings.map((w) => `schema at ${rev.slice(0, 7)}: ${w}`));
     return phys;
   };
-  const baseSchema = await loadAt(opts.base);
-  const headSchema = await loadAt(opts.head);
+  const baseSchema = await loadAt(opts.base, schemaPathBase);
+  const headSchema = await loadAt(opts.head, schemaPath);
 
   // --- find changed migration files ---
   const pathspec = migrationsPath ?? '';
@@ -116,7 +133,7 @@ export async function analyzeRepo(opts: AnalyzeOptions): Promise<Report> {
   }
   const isMigrationFile = (p: string): boolean => {
     if (!p.endsWith('.sql')) return false;
-    if (migrationsPath) return p.startsWith(`${migrationsPath}/`);
+    if (historyPaths.length) return historyPaths.some((d) => p.startsWith(`${d}/`));
     return p === 'migration.sql' || p.endsWith('/migration.sql');
   };
   const migrationFiles = changed.value
@@ -153,7 +170,7 @@ export async function analyzeRepo(opts: AnalyzeOptions): Promise<Report> {
   // --- lazy history index ---
   let historyPromise: Promise<HistoryIndex> | null = null;
   const getHistory = () => {
-    if (!historyPromise) historyPromise = buildHistoryIndex(git, opts.base, migrationsPath);
+    if (!historyPromise) historyPromise = buildHistoryIndex(git, opts.base, historyPaths);
     return historyPromise;
   };
 

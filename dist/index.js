@@ -321930,22 +321930,31 @@ async function analyzeRepo(opts) {
     if (!(await git.revExists(opts.head))) {
         return fatalReport(opts, `head commit ${opts.head} not present in this clone`, warnings);
     }
-    // --- locate schema and migrations at head ---
-    const schemaLoc = await (0, discover_1.discoverSchema)(git, opts.head, opts.schemaPath);
-    let schemaPath = null;
-    if (schemaLoc.ok)
-        schemaPath = schemaLoc.value.path;
-    else
-        warnings.push(schemaLoc.error);
+    // --- locate schema and migrations at BOTH revs: a PR can move them, and
+    // base-side reads must resolve against the base tree, not head's layout. ---
+    const schemaLocHead = await (0, discover_1.discoverSchema)(git, opts.head, opts.schemaPath);
+    const schemaLocBase = await (0, discover_1.discoverSchema)(git, opts.base, opts.schemaPath);
+    const schemaPath = schemaLocHead.ok ? schemaLocHead.value.path : null;
+    const schemaPathBase = schemaLocBase.ok ? schemaLocBase.value.path : null;
+    if (!schemaLocHead.ok)
+        warnings.push(schemaLocHead.error);
+    if (schemaPath && schemaPathBase && schemaPath !== schemaPathBase) {
+        warnings.push(`schema moved between base and head (${schemaPathBase} -> ${schemaPath})`);
+    }
     const migrationsPath = await (0, discover_1.discoverMigrations)(git, opts.head, opts.migrationsPath, schemaPath);
+    const migrationsPathBase = await (0, discover_1.discoverMigrations)(git, opts.base, opts.migrationsPath, schemaPathBase);
     if (!migrationsPath && opts.migrationsPath) {
         warnings.push(`configured migrations-path "${opts.migrationsPath}" not found at ${opts.head}`);
     }
+    const historyPaths = [...new Set([migrationsPath, migrationsPathBase].filter((p) => !!p))];
+    if (migrationsPath && migrationsPathBase && migrationsPath !== migrationsPathBase) {
+        warnings.push(`migrations directory moved between base and head (${migrationsPathBase} -> ${migrationsPath}); history searched under both`);
+    }
     // --- load schemas at both revs ---
-    const loadAt = async (rev) => {
-        if (!schemaPath)
+    const loadAt = async (rev, path) => {
+        if (!path)
             return { ok: false, error: `no Prisma schema found at ${rev}` };
-        const text = await (0, discover_1.loadSchemaText)(git, rev, schemaPath);
+        const text = await (0, discover_1.loadSchemaText)(git, rev, path);
         if (!text.ok)
             return text;
         const phys = await (0, prisma_1.loadPhysicalSchema)(text.value);
@@ -321953,8 +321962,8 @@ async function analyzeRepo(opts) {
             warnings.push(...phys.value.warnings.map((w) => `schema at ${rev.slice(0, 7)}: ${w}`));
         return phys;
     };
-    const baseSchema = await loadAt(opts.base);
-    const headSchema = await loadAt(opts.head);
+    const baseSchema = await loadAt(opts.base, schemaPathBase);
+    const headSchema = await loadAt(opts.head, schemaPath);
     // --- find changed migration files ---
     const pathspec = migrationsPath ?? '';
     const changed = await git.diffFiles(opts.base, opts.head, pathspec);
@@ -321964,8 +321973,8 @@ async function analyzeRepo(opts) {
     const isMigrationFile = (p) => {
         if (!p.endsWith('.sql'))
             return false;
-        if (migrationsPath)
-            return p.startsWith(`${migrationsPath}/`);
+        if (historyPaths.length)
+            return historyPaths.some((d) => p.startsWith(`${d}/`));
         return p === 'migration.sql' || p.endsWith('/migration.sql');
     };
     const migrationFiles = changed.value
@@ -322001,7 +322010,7 @@ async function analyzeRepo(opts) {
     let historyPromise = null;
     const getHistory = () => {
         if (!historyPromise)
-            historyPromise = (0, history_1.buildHistoryIndex)(git, opts.base, migrationsPath);
+            historyPromise = (0, history_1.buildHistoryIndex)(git, opts.base, historyPaths);
         return historyPromise;
     };
     const ctx = {
@@ -322222,7 +322231,7 @@ async function classifyDrop(op, migration, ctx) {
         return mk('UNKNOWN', [], `history search incomplete: ${history.incomplete[0]}${history.incomplete.length > 1 ? ` (+${history.incomplete.length - 1} more)` : ''}`);
     }
     return mk('NO_PRIOR_SCHEMA_EVIDENCE', [
-        `${history.filesSearched} migration file(s) in git history searched; no declaration of ${key} found`,
+        `${history.filesSearched} migration file(s) in git history searched under ${history.pathsSearched.join(', ')}; no declaration of ${key} found`,
         ...lenient,
     ]);
 }
@@ -322510,7 +322519,8 @@ function createGit(cwd) {
         },
         /** List files under a path at a rev. */
         async listFiles(rev, path) {
-            const r = await runGit(cwd, ['ls-tree', '-r', '--name-only', rev, '--', path]);
+            const args = ['ls-tree', '-r', '--name-only', rev, '--', path || '.'];
+            const r = await runGit(cwd, args);
             if (!r.ok)
                 return r;
             return { ok: true, value: r.value.split('\n').filter((l) => l.trim().length > 0) };
@@ -322582,23 +322592,27 @@ function failedHistory(error) {
         columnAdds: new Map(),
         tableCreates: new Map(),
         filesSearched: 0,
+        pathsSearched: [],
         incomplete: [],
     };
 }
 /**
  * Index which migrations in history (ancestors of base) added each column or
  * created each table. Fails closed: shallow history or git failures produce
- * ok:false so callers return UNKNOWN rather than a guess.
+ * ok:false so callers return UNKNOWN rather than a guess. Accepts multiple
+ * migrations paths because repositories restructure (the directory can move
+ * between revisions and across history).
  */
-async function buildHistoryIndex(git, base, migrationsPath) {
+async function buildHistoryIndex(git, base, migrationsPaths) {
     const index = {
         ok: true,
         columnAdds: new Map(),
         tableCreates: new Map(),
         filesSearched: 0,
+        pathsSearched: [...migrationsPaths],
         incomplete: [],
     };
-    if (!migrationsPath) {
+    if (migrationsPaths.length === 0) {
         return failedHistory('no migrations directory found; git history cannot be searched');
     }
     const shallow = await git.isShallow();
@@ -322608,9 +322622,17 @@ async function buildHistoryIndex(git, base, migrationsPath) {
         return failedHistory('shallow git history (fetch-depth is limited); re-run with fetch-depth: 0');
     if (!(await git.revExists(base)))
         return failedHistory(`base commit ${base} not present in this clone`);
-    const added = await git.logAddedFiles(base, migrationsPath);
-    if (!added.ok)
-        return failedHistory(added.error);
+    const addedAll = [];
+    for (const p of migrationsPaths) {
+        const added = await git.logAddedFiles(base, p);
+        if (!added.ok)
+            return failedHistory(added.error);
+        addedAll.push(...added.value);
+    }
+    // merge: each pathspec's list is newest-first; concat then re-sort newest
+    // first by commit order is unnecessary — earliest-wins overwrite below only
+    // requires every entry present once.
+    const added = { ok: true, value: addedAll };
     // logAddedFiles is newest-first; keep overwriting so each path maps to the
     // earliest commit that added it. Only SQL files are migration content —
     // skip lockfiles (migration_lock.toml) and other non-SQL files.

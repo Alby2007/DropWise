@@ -226,7 +226,7 @@ export async function classifyDrop(
     return mk('UNKNOWN', [], `history search incomplete: ${history.incomplete[0]}${history.incomplete.length > 1 ? ` (+${history.incomplete.length - 1} more)` : ''}`);
   }
   return mk('NO_PRIOR_SCHEMA_EVIDENCE', [
-    `${history.filesSearched} migration file(s) in git history searched; no declaration of ${key} found`,
+    `${history.filesSearched} migration file(s) in git history searched under ${history.pathsSearched.join(', ')}; no declaration of ${key} found`,
     ...lenient,
   ]);
 }

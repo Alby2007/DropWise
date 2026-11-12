@@ -62,7 +62,8 @@ export function createGit(cwd: string) {
     },
     /** List files under a path at a rev. */
     async listFiles(rev: string, path: string): Promise<Result<string[]>> {
-      const r = await runGit(cwd, ['ls-tree', '-r', '--name-only', rev, '--', path]);
+      const args = ['ls-tree', '-r', '--name-only', rev, '--', path || '.'];
+      const r = await runGit(cwd, args);
       if (!r.ok) return r;
       return { ok: true, value: r.value.split('\n').filter((l) => l.trim().length > 0) };
     },
