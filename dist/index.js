@@ -321911,7 +321911,16 @@ async function analyzeRepo(opts) {
     const git = (0, git_1.createGit)(opts.cwd);
     const warnings = [];
     const zeroDowntimeDeploys = opts.zeroDowntimeDeploys ?? true;
-    if (!(await git.isRepo())) {
+    const inside = await git.insideWorkTree();
+    let isRepo = inside.ok && inside.value.trim() === 'true';
+    if (!isRepo && !inside.ok && /dubious ownership/i.test(inside.error)) {
+        // CI runners can own the workspace as a different user — allow-list it and retry.
+        if (await git.addSafeDirectory()) {
+            const retry = await git.insideWorkTree();
+            isRepo = retry.ok && retry.value.trim() === 'true';
+        }
+    }
+    if (!isRepo) {
         return fatalReport(opts, `not a git repository: ${opts.cwd}`, warnings);
     }
     const shallow = await git.isShallow();
@@ -322161,9 +322170,17 @@ async function classifyDrop(op, migration, ctx) {
     const headT = ctx.headSchema.value.tables.get(op.table);
     const inBase = op.kind === 'drop_table' ? !!baseT : !!baseT && baseT.columns.has(op.column);
     const inHead = op.kind === 'drop_table' ? !!headT : !!headT && headT.columns.has(op.column);
+    // Schema-derived verdicts must disclose when extraction used the lenient
+    // fallback — hand-verified evidence quality is lower there.
+    const lenient = [];
+    if (ctx.baseSchema.value.parser === 'lenient')
+        lenient.push(`schema at base ${short(ctx.base)} extracted leniently (DMMF validation failed)`);
+    if (ctx.headSchema.value.parser === 'lenient')
+        lenient.push('schema at head extracted leniently (DMMF validation failed)');
     if (inBase && !inHead) {
         return mk('SAME_PR_REMOVAL', [
             `Prisma schema diff against base commit ${short(ctx.base)} and head schema`,
+            ...lenient,
         ]);
     }
     if (inBase && inHead) {
@@ -322198,6 +322215,7 @@ async function classifyDrop(op, migration, ctx) {
     if (hit) {
         return mk('PRIOR_SCHEMA_REMOVAL', [
             `absent from base schema at ${short(ctx.base)}; added by migration ${hit.migration} (commit ${short(hit.commit)})`,
+            ...lenient,
         ]);
     }
     if (history.incomplete.length > 0) {
@@ -322205,6 +322223,7 @@ async function classifyDrop(op, migration, ctx) {
     }
     return mk('NO_PRIOR_SCHEMA_EVIDENCE', [
         `${history.filesSearched} migration file(s) in git history searched; no declaration of ${key} found`,
+        ...lenient,
     ]);
 }
 /** Findings for statements in a migration that cannot be analysed at all. */
@@ -322271,6 +322290,10 @@ function renderComment(report, squawk) {
     out.push(exports.COMMENT_MARKER);
     out.push('## Migration rollout-risk report');
     out.push('');
+    if (report.shallowHistory === true) {
+        out.push('> **Tip:** this checkout is shallow — set `fetch-depth: 0` on `actions/checkout` to enable git-history evidence. Verdicts that need history currently report UNKNOWN.');
+        out.push('');
+    }
     if (report.fatal) {
         out.push(`> **Could not analyse this pull request:** ${report.fatal}`);
         out.push('');
@@ -322449,6 +322472,15 @@ function createGit(cwd) {
         async isRepo() {
             const r = await runGit(cwd, ['rev-parse', '--is-inside-work-tree']);
             return r.ok && r.value.trim() === 'true';
+        },
+        async insideWorkTree() {
+            return runGit(cwd, ['rev-parse', '--is-inside-work-tree']);
+        },
+        /** Git 2.35+ refuses repos owned by another user ("dubious ownership").
+         *  Adding the workspace to safe.directory fixes this on CI runners. */
+        async addSafeDirectory() {
+            const r = await runGit(cwd, ['config', '--global', '--add', 'safe.directory', cwd]);
+            return r.ok;
         },
         /** true = shallow, false = full, null = could not determine */
         async isShallow() {
@@ -322722,14 +322754,29 @@ async function run() {
         }
     }
     const totalFindings = report.migrations.reduce((n, m) => n + m.findings.length, 0);
+    const markdown = (0, comment_1.renderComment)(report, squawk);
+    // Job summary always gets the report — works on fork PRs where the token
+    // cannot post comments, and in CI environments without a PR token.
+    try {
+        await core.summary.addRaw(markdown).write();
+    }
+    catch {
+        core.info('could not write job summary (not in a GitHub Actions environment)');
+    }
     if (shouldComment && (totalFindings > 0 || report.fatal)) {
         if (!token) {
-            core.warning('no token available; skipping PR comment');
+            core.warning('no token available; skipping PR comment (report is in the job summary)');
         }
         else {
-            const octokit = github.getOctokit(token);
-            const { owner, repo } = github.context.repo;
-            await upsertComment(octokit, owner, repo, pr.number, (0, comment_1.renderComment)(report, squawk));
+            try {
+                const octokit = github.getOctokit(token);
+                const { owner, repo } = github.context.repo;
+                await upsertComment(octokit, owner, repo, pr.number, markdown);
+            }
+            catch (e) {
+                // e.g. fork PRs where the token is read-only — summary already written
+                core.warning(`could not post PR comment (${e instanceof Error ? e.message : e}); report is in the job summary`);
+            }
         }
     }
     else {

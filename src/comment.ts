@@ -41,6 +41,11 @@ export function renderComment(report: Report, squawk?: string): string {
   out.push('## Migration rollout-risk report');
   out.push('');
 
+  if (report.shallowHistory === true) {
+    out.push('> **Tip:** this checkout is shallow — set `fetch-depth: 0` on `actions/checkout` to enable git-history evidence. Verdicts that need history currently report UNKNOWN.');
+    out.push('');
+  }
+
   if (report.fatal) {
     out.push(`> **Could not analyse this pull request:** ${report.fatal}`);
     out.push('');

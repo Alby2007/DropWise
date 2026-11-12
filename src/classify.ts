@@ -171,9 +171,16 @@ export async function classifyDrop(
   const inBase = op.kind === 'drop_table' ? !!baseT : !!baseT && baseT.columns.has(op.column!);
   const inHead = op.kind === 'drop_table' ? !!headT : !!headT && headT.columns.has(op.column!);
 
+  // Schema-derived verdicts must disclose when extraction used the lenient
+  // fallback — hand-verified evidence quality is lower there.
+  const lenient: string[] = [];
+  if (ctx.baseSchema.value.parser === 'lenient') lenient.push(`schema at base ${short(ctx.base)} extracted leniently (DMMF validation failed)`);
+  if (ctx.headSchema.value.parser === 'lenient') lenient.push('schema at head extracted leniently (DMMF validation failed)');
+
   if (inBase && !inHead) {
     return mk('SAME_PR_REMOVAL', [
       `Prisma schema diff against base commit ${short(ctx.base)} and head schema`,
+      ...lenient,
     ]);
   }
   if (inBase && inHead) {
@@ -212,6 +219,7 @@ export async function classifyDrop(
   if (hit) {
     return mk('PRIOR_SCHEMA_REMOVAL', [
       `absent from base schema at ${short(ctx.base)}; added by migration ${hit.migration} (commit ${short(hit.commit)})`,
+      ...lenient,
     ]);
   }
   if (history.incomplete.length > 0) {
@@ -219,6 +227,7 @@ export async function classifyDrop(
   }
   return mk('NO_PRIOR_SCHEMA_EVIDENCE', [
     `${history.filesSearched} migration file(s) in git history searched; no declaration of ${key} found`,
+    ...lenient,
   ]);
 }
 

@@ -187,6 +187,9 @@ async function main(): Promise<void> {
   let matched = 0;
   let compared = 0;
   const missing = new Set<string>();
+  const actualByVerdict = new Map<string, number>();
+  let lenientOps = 0;
+  const lenientGroups = new Set<string>();
 
   for (const g of groups.values()) {
     const repoDir = path.join(REPOS_DIR, g.repo);
@@ -237,6 +240,7 @@ async function main(): Promise<void> {
 
     // findings keyed by op|table|column (multiset)
     const pool = new Map<string, { verdict: Verdict; reason?: string; summary: string; count: number }[]>();
+    const lenientThisGroup = report.warnings.some((w) => w.includes('lenient'));
     for (const m of report.migrations) {
       for (const f of m.findings) {
         if (f.operation.kind !== 'drop_column' && f.operation.kind !== 'drop_table') continue;
@@ -260,6 +264,7 @@ async function main(): Promise<void> {
         );
         if (dynamic) {
           if (expected === 'UNKNOWN') {
+            actualByVerdict.set('UNKNOWN', (actualByVerdict.get('UNKNOWN') ?? 0) + 1);
             matched++;
             continue;
           }
@@ -275,6 +280,11 @@ async function main(): Promise<void> {
       }
       const f = cands[0];
       f.count = 1;
+      actualByVerdict.set(f.verdict, (actualByVerdict.get(f.verdict) ?? 0) + 1);
+      if (lenientThisGroup) {
+        lenientOps++;
+        lenientGroups.add(`${g.repo}@${g.commit}`);
+      }
       if (f.verdict === expected) {
         matched++;
       } else {
@@ -290,6 +300,10 @@ async function main(): Promise<void> {
 
   const agreement = compared ? matched / compared : 0;
   console.log(`\nagreement: ${matched}/${compared} = ${(agreement * 100).toFixed(1)}% (target >= 95%)`);
+  console.log(`actual verdict distribution: ${JSON.stringify(Object.fromEntries(actualByVerdict))}`);
+  const unknown = actualByVerdict.get('UNKNOWN') ?? 0;
+  console.log(`UNKNOWN share: ${unknown}/${compared} = ${((unknown / compared) * 100).toFixed(1)}%`);
+  console.log(`ops whose schema evidence used lenient parse: ${lenientOps} (in ${lenientGroups.size} migrations)`);
   console.log(`diffs: ${diffs.length}`);
   for (const d of diffs) {
     console.log(`  ${d.repo}#${d.migrationId} ${d.op} ${d.target}: expected ${d.expected}, got ${d.actual} — ${d.note.slice(0, 140)}`);

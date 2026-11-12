@@ -27,6 +27,15 @@ export function createGit(cwd: string) {
       const r = await runGit(cwd, ['rev-parse', '--is-inside-work-tree']);
       return r.ok && r.value.trim() === 'true';
     },
+    async insideWorkTree(): Promise<Result<string>> {
+      return runGit(cwd, ['rev-parse', '--is-inside-work-tree']);
+    },
+    /** Git 2.35+ refuses repos owned by another user ("dubious ownership").
+     *  Adding the workspace to safe.directory fixes this on CI runners. */
+    async addSafeDirectory(): Promise<boolean> {
+      const r = await runGit(cwd, ['config', '--global', '--add', 'safe.directory', cwd]);
+      return r.ok;
+    },
     /** true = shallow, false = full, null = could not determine */
     async isShallow(): Promise<boolean | null> {
       const r = await runGit(cwd, ['rev-parse', '--is-shallow-repository']);

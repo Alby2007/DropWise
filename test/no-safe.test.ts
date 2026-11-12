@@ -18,7 +18,8 @@ afterAll(() => {
 describe('verdict language guard', () => {
   it('no source file produces "safe" as a verdict or claim', () => {
     for (const f of readdirSync(SRC_DIR).filter((f) => f.endsWith('.ts'))) {
-      const src = readFileSync(path.join(SRC_DIR, f), 'utf8');
+      // 'safe.directory' is a git config key, not output text — exempt it
+      const src = readFileSync(path.join(SRC_DIR, f), 'utf8').replace(/safe\.directory/g, '');
       expect(SAFE_WORD.test(src), `${f} must not use the word "safe"`).toBe(false);
     }
   });

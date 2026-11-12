@@ -70,13 +70,28 @@ async function run(): Promise<void> {
   }
 
   const totalFindings = report.migrations.reduce((n, m) => n + m.findings.length, 0);
+  const markdown = renderComment(report, squawk);
+
+  // Job summary always gets the report — works on fork PRs where the token
+  // cannot post comments, and in CI environments without a PR token.
+  try {
+    await core.summary.addRaw(markdown).write();
+  } catch {
+    core.info('could not write job summary (not in a GitHub Actions environment)');
+  }
+
   if (shouldComment && (totalFindings > 0 || report.fatal)) {
     if (!token) {
-      core.warning('no token available; skipping PR comment');
+      core.warning('no token available; skipping PR comment (report is in the job summary)');
     } else {
-      const octokit = github.getOctokit(token);
-      const { owner, repo } = github.context.repo;
-      await upsertComment(octokit, owner, repo, pr.number, renderComment(report, squawk));
+      try {
+        const octokit = github.getOctokit(token);
+        const { owner, repo } = github.context.repo;
+        await upsertComment(octokit, owner, repo, pr.number, markdown);
+      } catch (e) {
+        // e.g. fork PRs where the token is read-only — summary already written
+        core.warning(`could not post PR comment (${e instanceof Error ? e.message : e}); report is in the job summary`);
+      }
     }
   } else {
     core.info(`dropwise: ${totalFindings} finding(s), comment ${shouldComment ? 'skipped (nothing to report)' : 'disabled'}`);

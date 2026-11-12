@@ -60,7 +60,16 @@ export async function analyzeRepo(opts: AnalyzeOptions): Promise<Report> {
   const warnings: string[] = [];
   const zeroDowntimeDeploys = opts.zeroDowntimeDeploys ?? true;
 
-  if (!(await git.isRepo())) {
+  const inside = await git.insideWorkTree();
+  let isRepo = inside.ok && inside.value.trim() === 'true';
+  if (!isRepo && !inside.ok && /dubious ownership/i.test(inside.error)) {
+    // CI runners can own the workspace as a different user — allow-list it and retry.
+    if (await git.addSafeDirectory()) {
+      const retry = await git.insideWorkTree();
+      isRepo = retry.ok && retry.value.trim() === 'true';
+    }
+  }
+  if (!isRepo) {
     return fatalReport(opts, `not a git repository: ${opts.cwd}`, warnings);
   }
   const shallow = await git.isShallow();
