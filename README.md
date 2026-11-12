@@ -132,7 +132,24 @@ npm run build       # ncc bundle -> dist/ (committed for the action)
 `scripts/backtest.ts` replays `backtest_results.csv` against real clones and
 compares verdicts after the §4 renaming. Current result: **183/187 = 97.9%**
 agreement (target ≥ 95%); the four diffs are the intentional swap-pattern
-divergence (see `backtest_notes.md`).
+divergence (see `backtest_notes.md`). The UNKNOWN share on this run is
+**3.2%** (6/187) — but that figure is measured on the same five repositories
+the implementation was developed and tuned against, so treat it as a
+development-set number, not a general rate.
+
+### Held-out validation
+
+`scripts/heldout.ts` mines destructive migrations from Prisma repositories
+*outside* the back-test five and writes one JSON report per migration for
+hand review. Current run (ghostfolio, linkwarden, papermark, typebot):
+**65 findings** — 57 `SAME_PR_REMOVAL`, 5 `DESTRUCTIVE_REPLACEMENT`,
+2 `NO_PRIOR_SCHEMA_EVIDENCE`, 1 `PRIOR_SCHEMA_REMOVAL`, 0 `UNKNOWN`.
+
+Caveat: 57 of the 65 are the easy `SAME_PR_REMOVAL` case, so this sample says
+little about the harder verdict paths. The 8 non-trivial findings are
+published with evidence and the migration SQL side by side in
+[`heldout_review.md`](heldout_review.md) for independent hand-checking
+(regenerate with `npx tsx scripts/heldout_review.ts`).
 
 ```bash
 mkdir -p .backtest/repos

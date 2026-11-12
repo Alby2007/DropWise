@@ -1,6 +1,9 @@
 # Back-test reproduction notes
 
 Agreement: 183/187 = 97.9% on in-scope ops (drops only, Prisma repos, 60 migrations).
+UNKNOWN share on this data: 6/187 = 3.2%. Note this figure comes from the
+same five repositories the implementation was developed and tuned against —
+it is not a held-out measurement.
 Verdict renaming applied per brief §4: PREVIOUSLY_REMOVED->PRIOR_SCHEMA_REMOVAL,
 NEVER_RELEASED_IN_BASE/TEMP_SCAFFOLDING->NO_PRIOR_SCHEMA_EVIDENCE,
 DROPPED_AND_RECREATED->DESTRUCTIVE_REPLACEMENT, UNKNOWN_*->UNKNOWN.
