@@ -321892,6 +321892,7 @@ function fatalReport(opts, fatal, warnings) {
         reportVersion: types_1.REPORT_VERSION,
         mappingVersion: prisma_1.MAPPING_VERSION,
         base: opts.base,
+        mergeBase: opts.base,
         head: opts.head,
         schemaPath: null,
         migrationsPath: null,
@@ -321930,10 +321931,21 @@ async function analyzeRepo(opts) {
     if (!(await git.revExists(opts.head))) {
         return fatalReport(opts, `head commit ${opts.head} not present in this clone`, warnings);
     }
+    // Compare from the merge-base: pr.base.sha moves forward as the base
+    // branch advances, and diffing from it would attribute unrelated base
+    // changes to this PR. Fail closed when it cannot be determined.
+    const mb = await git.mergeBase(opts.base, opts.head);
+    const mergeBase = mb.ok ? mb.value : null;
+    if (!mergeBase) {
+        return fatalReport(opts, `could not determine merge-base of ${opts.base.slice(0, 7)}..${opts.head.slice(0, 7)}${mb.ok ? '' : `: ${mb.error}`}${shallow ? ' (shallow checkout — set fetch-depth: 0)' : ''}`, warnings);
+    }
+    if (mergeBase !== opts.base) {
+        warnings.push(`base branch moved since this PR was cut; base-side comparison uses merge-base ${mergeBase.slice(0, 7)}`);
+    }
     // --- locate schema and migrations at BOTH revs: a PR can move them, and
     // base-side reads must resolve against the base tree, not head's layout. ---
     const schemaLocHead = await (0, discover_1.discoverSchema)(git, opts.head, opts.schemaPath);
-    const schemaLocBase = await (0, discover_1.discoverSchema)(git, opts.base, opts.schemaPath);
+    const schemaLocBase = await (0, discover_1.discoverSchema)(git, mergeBase, opts.schemaPath);
     const schemaPath = schemaLocHead.ok ? schemaLocHead.value.path : null;
     const schemaPathBase = schemaLocBase.ok ? schemaLocBase.value.path : null;
     if (!schemaLocHead.ok)
@@ -321942,7 +321954,7 @@ async function analyzeRepo(opts) {
         warnings.push(`schema moved between base and head (${schemaPathBase} -> ${schemaPath})`);
     }
     const migrationsPath = await (0, discover_1.discoverMigrations)(git, opts.head, opts.migrationsPath, schemaPath);
-    const migrationsPathBase = await (0, discover_1.discoverMigrations)(git, opts.base, opts.migrationsPath, schemaPathBase);
+    const migrationsPathBase = await (0, discover_1.discoverMigrations)(git, mergeBase, opts.migrationsPath, schemaPathBase);
     if (!migrationsPath && opts.migrationsPath) {
         warnings.push(`configured migrations-path "${opts.migrationsPath}" not found at ${opts.head}`);
     }
@@ -321962,13 +321974,13 @@ async function analyzeRepo(opts) {
             warnings.push(...phys.value.warnings.map((w) => `schema at ${rev.slice(0, 7)}: ${w}`));
         return phys;
     };
-    const baseSchema = await loadAt(opts.base, schemaPathBase);
+    const baseSchema = await loadAt(mergeBase, schemaPathBase);
     const headSchema = await loadAt(opts.head, schemaPath);
     // --- find changed migration files ---
     const pathspec = migrationsPath ?? '';
-    const changed = await git.diffFiles(opts.base, opts.head, pathspec);
+    const changed = await git.diffFiles(mergeBase, opts.head, pathspec);
     if (!changed.ok) {
-        return fatalReport(opts, `could not diff ${opts.base}..${opts.head}: ${changed.error}`, warnings);
+        return fatalReport(opts, `could not diff ${mergeBase}..${opts.head}: ${changed.error}`, warnings);
     }
     const isMigrationFile = (p) => {
         if (!p.endsWith('.sql'))
@@ -322010,11 +322022,11 @@ async function analyzeRepo(opts) {
     let historyPromise = null;
     const getHistory = () => {
         if (!historyPromise)
-            historyPromise = (0, history_1.buildHistoryIndex)(git, opts.base, historyPaths);
+            historyPromise = (0, history_1.buildHistoryIndex)(git, mergeBase, historyPaths);
         return historyPromise;
     };
     const ctx = {
-        base: opts.base,
+        base: mergeBase,
         head: opts.head,
         baseSchema,
         headSchema,
@@ -322048,6 +322060,7 @@ async function analyzeRepo(opts) {
         reportVersion: types_1.REPORT_VERSION,
         mappingVersion: prisma_1.MAPPING_VERSION,
         base: opts.base,
+        mergeBase,
         head: opts.head,
         schemaPath,
         migrationsPath,
@@ -322502,6 +322515,15 @@ function createGit(cwd) {
             const r = await runGit(cwd, ['cat-file', '-e', `${rev}^{commit}`]);
             return r.ok;
         },
+        /** Best common ancestor of two revs — the commit a PR was actually cut
+         *  from. Needed because pr.base.sha moves forward as the base branch
+         *  advances; diffing from it would include unrelated base changes. */
+        async mergeBase(a, b) {
+            const r = await runGit(cwd, ['merge-base', a, b]);
+            if (!r.ok)
+                return r;
+            return { ok: true, value: r.value.trim() };
+        },
         async showFile(rev, path) {
             return runGit(cwd, ['show', `${rev}:${path}`]);
         },
@@ -322678,9 +322700,10 @@ async function buildHistoryIndex(git, base, migrationsPaths) {
 /***/ }),
 
 /***/ 79407:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+/***/ (function(module, exports, __nccwpck_require__) {
 
 "use strict";
+/* module decorator */ module = __nccwpck_require__.nmd(module);
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -322716,6 +322739,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.run = run;
 const core = __importStar(__nccwpck_require__(37484));
 const github = __importStar(__nccwpck_require__(93228));
 const node_fs_1 = __nccwpck_require__(73024);
@@ -322806,9 +322830,13 @@ async function run() {
     }
     core.info(`dropwise: done — ${JSON.stringify(report.stats.byVerdict)}`);
 }
-run().catch((e) => {
-    core.setFailed(e instanceof Error ? e.message : String(e));
-});
+// Auto-run only when executed as the action entrypoint (dist bundle);
+// tests import run() directly with mocked @actions modules.
+if (__nccwpck_require__.c[__nccwpck_require__.s] === module) {
+    run().catch((e) => {
+        core.setFailed(e instanceof Error ? e.message : String(e));
+    });
+}
 
 
 /***/ }),
@@ -322900,6 +322928,7 @@ function lenientParse(text) {
             const field = {
                 name: fname,
                 kind: isObject ? 'object' : 'scalar',
+                type: ftype,
                 isList: list,
                 dbName: mapM ? mapM[1] : null,
                 relationFromFields: /fields\s*:/.test(rest) ? ['_'] : [],
@@ -322917,6 +322946,29 @@ function lenientParse(text) {
     }
     if (models.size === 0)
         return null;
+    // Pair un-named relation sides: a list field `x T[]` on M pairs with the
+    // object field(s) on T of type M. DMMF assigns a shared relationName to
+    // both sides; the lenient parser must do it structurally so m-n detection
+    // downstream can tell a real implicit relation (two list sides) from an
+    // ordinary one-to-many (one list side + one FK side).
+    for (const m of models.values()) {
+        for (const f of m.fields) {
+            if (f.kind !== 'object' || !f.isList || !f.type)
+                continue;
+            const target = models.get(f.type);
+            if (!target)
+                continue;
+            const counterparts = target.fields.filter((g) => g.kind === 'object' && g.type === m.name);
+            const named = f.relationName
+                ? counterparts.filter((g) => !g.relationName || g.relationName === f.relationName)
+                : counterparts;
+            if (named.length !== 1)
+                continue;
+            const rel = f.relationName ?? named[0].relationName ?? [m.name, f.type].sort().join('To');
+            f.relationName = rel;
+            named[0].relationName = rel;
+        }
+    }
     return { datamodel: { models: [...models.values()] } };
 }
 async function parseSchema(datamodel) {
@@ -322959,18 +323011,21 @@ function toPhysicalSchema(parsed) {
         }
         tables.set(tableName, table);
     }
-    // Implicit many-to-many join tables. An implicit relation has both sides
-    // marked isList with no explicit FK fields; Prisma names the table _<relationName>.
+    // Implicit many-to-many join tables. An implicit relation has BOTH sides
+    // marked isList with no explicit FK fields; Prisma names the table
+    // _<relationName>. An ordinary one-to-many has exactly one list side (the
+    // other side carries the FK fields) — group all object fields by relation
+    // name so the two cases are distinguishable.
     const relations = new Map();
     for (const model of datamodel.models) {
         for (const f of model.fields) {
-            if (f.kind !== 'object' || !f.isList)
-                continue;
-            if ((f.relationFromFields?.length ?? 0) > 0 || (f.relationToFields?.length ?? 0) > 0)
+            if (f.kind !== 'object')
                 continue;
             const key = f.relationName ?? '';
             if (!key) {
-                warnings.push(`list relation ${model.name}.${f.name} has no relation name; implicit join table cannot be derived`);
+                if (f.isList) {
+                    warnings.push(`list relation ${model.name}.${f.name} has no relation name; implicit join table cannot be derived`);
+                }
                 continue;
             }
             const sides = relations.get(key) ?? [];
@@ -322978,17 +323033,34 @@ function toPhysicalSchema(parsed) {
             relations.set(key, sides);
         }
     }
+    const hasFk = (f) => (f.relationFromFields?.length ?? 0) > 0 || (f.relationToFields?.length ?? 0) > 0;
     for (const [relName, sides] of relations) {
-        if (sides.length !== 2) {
+        const listNoFk = sides.filter((s) => s.field.isList && !hasFk(s.field));
+        if (sides.length === 2 && listNoFk.length === 2) {
+            if (sides[0].model === sides[1].model) {
+                warnings.push(`self relation "${relName}" maps to implicit join table _${relName}; A/B direction is ambiguous`);
+            }
+            tables.set(`_${relName}`, {
+                name: `_${relName}`,
+                columns: new Set(['A', 'B']),
+                implicit: true,
+            });
+            continue;
+        }
+        if (listNoFk.length === 0)
+            continue; // no potential join-table side
+        if (sides.length > 2 || listNoFk.length > 1) {
             warnings.push(`relation "${relName}" has ${sides.length} side(s); implicit join table _${relName} may be ambiguous`);
             continue;
         }
-        const table = {
-            name: `_${relName}`,
-            columns: new Set(['A', 'B']),
-            implicit: true,
-        };
-        tables.set(table.name, table);
+        // exactly one unmatched list side — could be an implicit m-n whose
+        // opposite side is missing (lenient-parsed schemas) or the parser did
+        // not pair the names. Warn: join-table existence cannot be confirmed.
+        if (sides.length === 1) {
+            warnings.push(`relation "${relName}" has an unmatched list side; implicit join table _${relName} cannot be confirmed`);
+        }
+        // otherwise sides=2 with one list side + one scalar-bearing side:
+        // an ordinary one-to-many — no warning.
     }
     return { tables, warnings, parser: parsed.parser };
 }
@@ -340661,8 +340733,8 @@ module.exports = /*#__PURE__*/JSON.parse('{"prisma":{"enginesVersion":"2ba551f31
 /******/ 		}
 /******/ 		// Create a new module (and put it into the cache)
 /******/ 		var module = __webpack_module_cache__[moduleId] = {
-/******/ 			// no module.id needed
-/******/ 			// no module.loaded needed
+/******/ 			id: moduleId,
+/******/ 			loaded: false,
 /******/ 			exports: {}
 /******/ 		};
 /******/ 	
@@ -340675,12 +340747,18 @@ module.exports = /*#__PURE__*/JSON.parse('{"prisma":{"enginesVersion":"2ba551f31
 /******/ 			if(threw) delete __webpack_module_cache__[moduleId];
 /******/ 		}
 /******/ 	
+/******/ 		// Flag the module as loaded
+/******/ 		module.loaded = true;
+/******/ 	
 /******/ 		// Return the exports of the module
 /******/ 		return module.exports;
 /******/ 	}
 /******/ 	
 /******/ 	// expose the modules object (__webpack_modules__)
 /******/ 	__nccwpck_require__.m = __webpack_modules__;
+/******/ 	
+/******/ 	// expose the module cache
+/******/ 	__nccwpck_require__.c = __webpack_module_cache__;
 /******/ 	
 /************************************************************************/
 /******/ 	/* webpack/runtime/asset-relocator-loader */
@@ -340766,6 +340844,15 @@ module.exports = /*#__PURE__*/JSON.parse('{"prisma":{"enginesVersion":"2ba551f31
 /******/ 		};
 /******/ 	})();
 /******/ 	
+/******/ 	/* webpack/runtime/node module decorator */
+/******/ 	(() => {
+/******/ 		__nccwpck_require__.nmd = (module) => {
+/******/ 			module.paths = [];
+/******/ 			if (!module.children) module.children = [];
+/******/ 			return module;
+/******/ 		};
+/******/ 	})();
+/******/ 	
 /******/ 	/* webpack/runtime/require chunk loading */
 /******/ 	(() => {
 /******/ 		// no baseURI
@@ -340810,10 +340897,10 @@ module.exports = /*#__PURE__*/JSON.parse('{"prisma":{"enginesVersion":"2ba551f31
 /******/ 	
 /************************************************************************/
 /******/ 	
+/******/ 	// module cache are used so entry inlining is disabled
 /******/ 	// startup
 /******/ 	// Load entry module and return exports
-/******/ 	// This entry module is referenced by other modules so it can't be inlined
-/******/ 	var __webpack_exports__ = __nccwpck_require__(79407);
+/******/ 	var __webpack_exports__ = __nccwpck_require__(__nccwpck_require__.s = 79407);
 /******/ 	module.exports = __webpack_exports__;
 /******/ 	
 /******/ })()

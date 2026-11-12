@@ -54,6 +54,13 @@ describe('regression fixtures (real-commit cases)', () => {
         }
       }
 
+      if (fx.expectWarningsInclude) {
+        expect(
+          report.warnings.join(' ').toLowerCase(),
+          `fixture ${fx.id} should warn about ${fx.expectWarningsInclude}`,
+        ).toContain(fx.expectWarningsInclude.toLowerCase());
+      }
+
       // comment renders without crashing
       const comment = renderComment(report);
       expect(comment).toContain('Migration rollout-risk report');
@@ -109,6 +116,9 @@ describe('fail-closed behaviour', () => {
     // evidence exists in full history (PRIOR) but shallow clone must not guess
     expect(verdictsOf(findings)).toEqual(['UNKNOWN']);
     expect(findings[0].reason).toMatch(/shallow/i);
+
+    // the rendered comment must tell the user how to fix it
+    expect(renderComment(report)).toContain('fetch-depth: 0');
   });
 
   it('not a git repository -> fatal report', async () => {

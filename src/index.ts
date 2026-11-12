@@ -26,7 +26,7 @@ async function upsertComment(
   }
 }
 
-async function run(): Promise<void> {
+export async function run(): Promise<void> {
   const pr = github.context.payload.pull_request;
   if (!pr) {
     core.setFailed('dropwise runs on pull_request events only.');
@@ -100,6 +100,10 @@ async function run(): Promise<void> {
   core.info(`dropwise: done — ${JSON.stringify(report.stats.byVerdict)}`);
 }
 
-run().catch((e) => {
-  core.setFailed(e instanceof Error ? e.message : String(e));
-});
+// Auto-run only when executed as the action entrypoint (dist bundle);
+// tests import run() directly with mocked @actions modules.
+if (require.main === module) {
+  run().catch((e) => {
+    core.setFailed(e instanceof Error ? e.message : String(e));
+  });
+}

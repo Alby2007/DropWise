@@ -16,6 +16,8 @@ export interface FixtureCase {
   /** expected 'detail' for UNKNOWN findings, checked loosely */
   expectReasonIncludes?: string;
   expectFatal?: boolean;
+  /** a report warning must contain this substring */
+  expectWarningsInclude?: string;
 }
 
 const T_RUN = `model TaskRun {
@@ -421,6 +423,39 @@ ALTER TABLE "OrganisationGroup" DROP COLUMN "temp_team_id";`),
   },
 
   // ---------- adversarial fixtures ----------
+
+  {
+    id: 'restructure-moves-dirs',
+    description: 'Schema and migrations dirs move between base and head (monorepo restructure)',
+    source: 'linkwarden prisma/ -> packages/prisma/',
+    commits: [
+      {
+        files: {
+          'prisma/schema.prisma': schema(`model User {
+  id     Int    @id
+  legacy String
+}`),
+          ...mig('20240101_init', `CREATE TABLE "User" ("id" SERIAL PRIMARY KEY, "legacy" TEXT NOT NULL);`),
+        },
+      },
+      {
+        message: 'restructure into packages/prisma and drop legacy',
+        files: {
+          'prisma/schema.prisma': null,
+          'prisma/migrations/20240101_init/migration.sql': null,
+          'packages/prisma/schema.prisma': schema(`model User {
+  id Int @id
+}`),
+          'packages/prisma/migrations/20240101_init/migration.sql': `CREATE TABLE "User" ("id" SERIAL PRIMARY KEY, "legacy" TEXT NOT NULL);`,
+          'packages/prisma/migrations/20240102_drop/migration.sql': `ALTER TABLE "User" DROP COLUMN "legacy";`,
+        },
+      },
+    ],
+    baseIndex: 0,
+    headIndex: 1,
+    expected: ['SAME_PR_REMOVAL'],
+    expectWarningsInclude: 'moved',
+  },
 
   {
     id: 'adv-renamed-model',
