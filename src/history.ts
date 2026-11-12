@@ -60,9 +60,12 @@ export async function buildHistoryIndex(
   if (!added.ok) return failedHistory(added.error);
 
   // logAddedFiles is newest-first; keep overwriting so each path maps to the
-  // earliest commit that added it.
+  // earliest commit that added it. Only SQL files are migration content —
+  // skip lockfiles (migration_lock.toml) and other non-SQL files.
   const earliest = new Map<string, string>();
-  for (const { commit, path } of added.value) earliest.set(path, commit);
+  for (const { commit, path } of added.value) {
+    if (path.endsWith('.sql')) earliest.set(path, commit);
+  }
 
   const parseCache = new Map<string, Promise<MigrationOps>>();
   const parseOnce = (sql: string): Promise<MigrationOps> => {

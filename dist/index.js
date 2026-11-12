@@ -321978,8 +321978,8 @@ async function analyzeRepo(opts) {
                     drops: [],
                     adds: [],
                     creates: [],
-                    renamedColumns: new Set(),
-                    renamedTables: new Set(),
+                    renamedColumns: new Map(),
+                    renamedTables: new Map(),
                     dynamic: [],
                     hasUpdate: false,
                 },
@@ -322111,17 +322111,21 @@ async function classifyDrop(op, migration, ctx) {
     const mk = (verdict, evidence, reason, recommendation) => finding(op, migration.name, verdict, summaryFor(verdict, op, reason), evidence, recommendation ?? baseRecommendation(verdict, op, ctx.zeroDowntimeDeploys), reason);
     // --- same-migration structural checks (run before schema evidence) ---
     if (op.kind === 'drop_column') {
-        if (migration.ops.renamedTables.has(op.table)) {
+        const tableRename = migration.ops.renamedTables.get(op.table);
+        if (tableRename !== undefined && tableRename < op.order) {
             return mk('UNKNOWN', [`migration renames a table to ${op.table}`], 'column dropped on a renamed table; renames not yet supported');
         }
-        if (migration.ops.renamedColumns.has(key)) {
-            return mk('UNKNOWN', [`migration contains ALTER TABLE ... RENAME ... TO ${op.column}`], 'swap pattern; renames not yet supported');
+        const colRename = migration.ops.renamedColumns.get(key);
+        if (colRename !== undefined) {
+            if (colRename > op.order) {
+                return mk('UNKNOWN', [`migration contains ALTER TABLE ... RENAME ... TO ${op.column}`], 'swap pattern; renames not yet supported');
+            }
+            return mk('NO_PRIOR_SCHEMA_EVIDENCE', [
+                `column renamed into place and then dropped within ${migration.name}`,
+            ]);
         }
         const add = migration.ops.adds.find((a) => a.table === op.table && a.column === op.column);
         if (add && add.order > op.order) {
-            if (migration.ops.hasUpdate) {
-                return mk('UNKNOWN', [`column dropped and re-added within ${migration.name} alongside UPDATE statements`], 'drop and re-add with data manipulation; manual review needed');
-            }
             return mk('DESTRUCTIVE_REPLACEMENT', [`column dropped and re-added within ${migration.name}`]);
         }
         if (add && add.order < op.order) {
@@ -322129,14 +322133,17 @@ async function classifyDrop(op, migration, ctx) {
         }
     }
     else {
-        if (migration.ops.renamedTables.has(op.table)) {
-            return mk('UNKNOWN', [`migration renames a table to ${op.table}`], 'renamed table dropped; renames not yet supported');
+        const tableRename = migration.ops.renamedTables.get(op.table);
+        if (tableRename !== undefined) {
+            if (tableRename < op.order) {
+                return mk('NO_PRIOR_SCHEMA_EVIDENCE', [
+                    `table renamed into place and then dropped within ${migration.name}`,
+                ]);
+            }
+            return mk('UNKNOWN', [`migration renames a table to ${op.table} after dropping it`], 'table swap pattern; renames not yet supported');
         }
         const create = migration.ops.creates.find((c) => c.table === op.table);
         if (create && create.order > op.order) {
-            if (migration.ops.hasUpdate) {
-                return mk('UNKNOWN', [`table dropped and re-created within ${migration.name} alongside UPDATE statements`], 'drop and re-create with data manipulation; manual review needed');
-            }
             return mk('DESTRUCTIVE_REPLACEMENT', [`table dropped and re-created within ${migration.name}`]);
         }
         if (create && create.order < op.order) {
@@ -322573,10 +322580,13 @@ async function buildHistoryIndex(git, base, migrationsPath) {
     if (!added.ok)
         return failedHistory(added.error);
     // logAddedFiles is newest-first; keep overwriting so each path maps to the
-    // earliest commit that added it.
+    // earliest commit that added it. Only SQL files are migration content —
+    // skip lockfiles (migration_lock.toml) and other non-SQL files.
     const earliest = new Map();
-    for (const { commit, path } of added.value)
-        earliest.set(path, commit);
+    for (const { commit, path } of added.value) {
+        if (path.endsWith('.sql'))
+            earliest.set(path, commit);
+    }
     const parseCache = new Map();
     const parseOnce = (sql) => {
         let p = parseCache.get(sql);
@@ -322741,6 +322751,7 @@ run().catch((e) => {
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.MAPPING_VERSION = void 0;
+exports.lenientParse = lenientParse;
 exports.parseSchema = parseSchema;
 exports.toPhysicalSchema = toPhysicalSchema;
 exports.loadPhysicalSchema = loadPhysicalSchema;
@@ -322765,12 +322776,87 @@ const PARSERS = [
     // Prisma 7 schemas (datasource url removed).
     { name: 'prisma7', load: () => (__nccwpck_require__(35218).getDMMF) },
 ];
+/**
+ * Lenient structural fallback for schemas Prisma itself committed but DMMF
+ * validation rejects (duplicate models, missing opposite relation fields,
+ * view blocks, …). Used only after both DMMF parsers fail. Extracts the same
+ * DmmfModel shape so toPhysicalSchema applies uniformly. Duplicated models
+ * are merged.
+ */
+function lenientParse(text) {
+    const clean = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    const lines = clean.split('\n');
+    const blocks = [];
+    let cur = null;
+    const headRe = /^\s*(model|view|type|enum)\s+(\w+)\s*\{/;
+    for (const line of lines) {
+        if (!cur) {
+            const m = headRe.exec(line);
+            if (m)
+                cur = { kind: m[1], name: m[2], body: [] };
+            continue;
+        }
+        if (/^\s*\}/.test(line)) {
+            blocks.push(cur);
+            cur = null;
+            continue;
+        }
+        cur.body.push(line);
+    }
+    const modelNames = new Set(blocks.filter((b) => b.kind === 'model' || b.kind === 'view').map((b) => b.name));
+    const models = new Map();
+    for (const b of blocks) {
+        if (b.kind !== 'model' && b.kind !== 'view')
+            continue;
+        const model = models.get(b.name) ?? { name: b.name, dbName: null, fields: [] };
+        for (const raw of b.body) {
+            const line = raw.trim();
+            if (!line)
+                continue;
+            const mm = /@@map\(\s*(?:name:\s*)?"([^"]+)"/.exec(line);
+            if (mm) {
+                model.dbName = mm[1];
+                continue;
+            }
+            if (line.startsWith('@'))
+                continue;
+            const fm = /^(\w+)\s+([\w.]+)\s*(\[\])?\s*\??\s*(.*)$/.exec(line);
+            if (!fm)
+                continue;
+            const [, fname, ftype, isList, rest] = fm;
+            const mapM = /@map\(\s*(?:name:\s*)?"([^"]+)"/.exec(rest);
+            const relM = /@relation\(\s*(?:name:\s*)?"([^"]+)"/.exec(rest) ?? /name:\s*"([^"]+)"/.exec(rest);
+            const isObject = modelNames.has(ftype);
+            const list = !!isList;
+            const field = {
+                name: fname,
+                kind: isObject ? 'object' : 'scalar',
+                isList: list,
+                dbName: mapM ? mapM[1] : null,
+                relationFromFields: /fields\s*:/.test(rest) ? ['_'] : [],
+                relationToFields: [],
+            };
+            if (isObject && list) {
+                field.relationName = relM ? relM[1] : [b.name, ftype].sort().join('To');
+            }
+            else if (relM) {
+                field.relationName = relM[1];
+            }
+            model.fields.push(field);
+        }
+        models.set(b.name, model);
+    }
+    if (models.size === 0)
+        return null;
+    return { datamodel: { models: [...models.values()] } };
+}
 async function parseSchema(datamodel) {
     const errors = [];
     for (const p of PARSERS) {
         try {
             const getDMMF = p.load();
-            return { ok: true, value: await getDMMF({ datamodel }) };
+            const dmmf = await getDMMF({ datamodel });
+            return { ok: true, value: { datamodel: dmmf.datamodel, parser: p.name } };
         }
         catch (e) {
             const msg = stripAnsi(e instanceof Error ? e.message : String(e))
@@ -322781,12 +322867,20 @@ async function parseSchema(datamodel) {
             errors.push(`${p.name}: ${msg || 'parse failed'}`);
         }
     }
+    const lenient = lenientParse(datamodel);
+    if (lenient) {
+        return { ok: true, value: { datamodel: lenient.datamodel, parser: 'lenient' } };
+    }
     return { ok: false, error: `Prisma schema could not be parsed — ${errors.join(' | ')}` };
 }
-function toPhysicalSchema(dmmf) {
+function toPhysicalSchema(parsed) {
+    const datamodel = parsed.datamodel;
     const tables = new Map();
     const warnings = [];
-    for (const model of dmmf.datamodel.models) {
+    if (parsed.parser === 'lenient') {
+        warnings.push('schema failed DMMF validation; extracted with lenient structural parser');
+    }
+    for (const model of datamodel.models) {
         const tableName = model.dbName ?? model.name;
         const table = { name: tableName, modelName: model.name, columns: new Set() };
         for (const f of model.fields) {
@@ -322799,7 +322893,7 @@ function toPhysicalSchema(dmmf) {
     // Implicit many-to-many join tables. An implicit relation has both sides
     // marked isList with no explicit FK fields; Prisma names the table _<relationName>.
     const relations = new Map();
-    for (const model of dmmf.datamodel.models) {
+    for (const model of datamodel.models) {
         for (const f of model.fields) {
             if (f.kind !== 'object' || !f.isList)
                 continue;
@@ -322827,7 +322921,7 @@ function toPhysicalSchema(dmmf) {
         };
         tables.set(table.name, table);
     }
-    return { tables, warnings };
+    return { tables, warnings, parser: parsed.parser };
 }
 async function loadPhysicalSchema(datamodel) {
     const parsed = await parseSchema(datamodel);
@@ -322886,8 +322980,8 @@ async function extractOps(sql) {
         drops: [],
         adds: [],
         creates: [],
-        renamedColumns: new Set(),
-        renamedTables: new Set(),
+        renamedColumns: new Map(),
+        renamedTables: new Map(),
         dynamic: [],
         hasUpdate: false,
     };
@@ -322944,10 +323038,10 @@ async function extractOps(sql) {
             const newname = body.newname;
             const table = relname(body.relation);
             if (renameType === 'OBJECT_TABLE' && newname) {
-                result.renamedTables.add(newname);
+                result.renamedTables.set(newname, base);
             }
             else if (renameType === 'OBJECT_COLUMN' && table && newname) {
-                result.renamedColumns.add(`${table}.${newname}`);
+                result.renamedColumns.set(`${table}.${newname}`, base);
             }
         }
         else if (type === 'CreateStmt' || type === 'CreateTableAsStmt') {

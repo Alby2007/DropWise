@@ -127,6 +127,23 @@ npm run coverage    # fixture coverage: operations / migrations / per-fixture
 npm run build       # ncc bundle -> dist/ (committed for the action)
 ```
 
+### Back-test reproduction
+
+`scripts/backtest.ts` replays `backtest_results.csv` against real clones and
+compares verdicts after the §4 renaming. Current result: **183/187 = 97.9%**
+agreement (target ≥ 95%); the four diffs are the intentional swap-pattern
+divergence (see `backtest_notes.md`).
+
+```bash
+mkdir -p .backtest/repos
+git clone --filter=blob:none --no-checkout https://github.com/documenso/documenso .backtest/repos/documenso
+git clone --filter=blob:none --no-checkout https://github.com/formbricks/formbricks .backtest/repos/formbricks
+git clone --filter=blob:none --no-checkout https://github.com/langfuse/langfuse .backtest/repos/langfuse
+git clone --filter=blob:none --no-checkout https://github.com/hoppscotch/hoppscotch .backtest/repos/hoppscotch
+git clone --filter=blob:none --no-checkout https://github.com/triggerdotdev/trigger.dev .backtest/repos/trigger.dev
+npx tsx scripts/backtest.ts --write-notes
+```
+
 ### Tests
 
 Fixtures in `test/fixtures.ts` model the real commits from the design

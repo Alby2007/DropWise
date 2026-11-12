@@ -117,36 +117,41 @@ export async function classifyDrop(
 
   // --- same-migration structural checks (run before schema evidence) ---
   if (op.kind === 'drop_column') {
-    if (migration.ops.renamedTables.has(op.table)) {
+    const tableRename = migration.ops.renamedTables.get(op.table);
+    if (tableRename !== undefined && tableRename < op.order) {
       return mk('UNKNOWN', [`migration renames a table to ${op.table}`],
         'column dropped on a renamed table; renames not yet supported');
     }
-    if (migration.ops.renamedColumns.has(key)) {
-      return mk('UNKNOWN', [`migration contains ALTER TABLE ... RENAME ... TO ${op.column}`],
-        'swap pattern; renames not yet supported');
+    const colRename = migration.ops.renamedColumns.get(key);
+    if (colRename !== undefined) {
+      if (colRename > op.order) {
+        return mk('UNKNOWN', [`migration contains ALTER TABLE ... RENAME ... TO ${op.column}`],
+          'swap pattern; renames not yet supported');
+      }
+      return mk('NO_PRIOR_SCHEMA_EVIDENCE', [
+        `column renamed into place and then dropped within ${migration.name}`,
+      ]);
     }
     const add = migration.ops.adds.find((a) => a.table === op.table && a.column === op.column);
     if (add && add.order > op.order) {
-      if (migration.ops.hasUpdate) {
-        return mk('UNKNOWN', [`column dropped and re-added within ${migration.name} alongside UPDATE statements`],
-          'drop and re-add with data manipulation; manual review needed');
-      }
       return mk('DESTRUCTIVE_REPLACEMENT', [`column dropped and re-added within ${migration.name}`]);
     }
     if (add && add.order < op.order) {
       return mk('NO_PRIOR_SCHEMA_EVIDENCE', [`column added and dropped within ${migration.name}`]);
     }
   } else {
-    if (migration.ops.renamedTables.has(op.table)) {
-      return mk('UNKNOWN', [`migration renames a table to ${op.table}`],
-        'renamed table dropped; renames not yet supported');
+    const tableRename = migration.ops.renamedTables.get(op.table);
+    if (tableRename !== undefined) {
+      if (tableRename < op.order) {
+        return mk('NO_PRIOR_SCHEMA_EVIDENCE', [
+          `table renamed into place and then dropped within ${migration.name}`,
+        ]);
+      }
+      return mk('UNKNOWN', [`migration renames a table to ${op.table} after dropping it`],
+        'table swap pattern; renames not yet supported');
     }
     const create = migration.ops.creates.find((c) => c.table === op.table);
     if (create && create.order > op.order) {
-      if (migration.ops.hasUpdate) {
-        return mk('UNKNOWN', [`table dropped and re-created within ${migration.name} alongside UPDATE statements`],
-          'drop and re-create with data manipulation; manual review needed');
-      }
       return mk('DESTRUCTIVE_REPLACEMENT', [`table dropped and re-created within ${migration.name}`]);
     }
     if (create && create.order < op.order) {

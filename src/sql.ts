@@ -17,10 +17,11 @@ export interface MigrationOps {
   adds: { table: string; column: string; order: number }[];
   /** Tables created by CREATE TABLE in this migration. */
   creates: { table: string; order: number }[];
-  /** "table.col" keys for columns that are the *target* of a RENAME COLUMN ... TO. */
-  renamedColumns: Set<string>;
-  /** Table names that are the target of ALTER TABLE ... RENAME TO. */
-  renamedTables: Set<string>;
+  /** "table.col" keys for columns that are the *target* of a RENAME COLUMN ... TO,
+   *  with statement order so drop-vs-rename position is known. */
+  renamedColumns: Map<string, number>;
+  /** Table names that are the target of ALTER TABLE ... RENAME TO, with order. */
+  renamedTables: Map<string, number>;
   /** Dynamic statements that cannot be analysed (DO blocks, functions, procedures). */
   dynamic: string[];
   hasUpdate: boolean;
@@ -64,8 +65,8 @@ export async function extractOps(sql: string): Promise<MigrationOps> {
     drops: [],
     adds: [],
     creates: [],
-    renamedColumns: new Set(),
-    renamedTables: new Set(),
+    renamedColumns: new Map(),
+    renamedTables: new Map(),
     dynamic: [],
     hasUpdate: false,
   };
@@ -116,9 +117,9 @@ export async function extractOps(sql: string): Promise<MigrationOps> {
       const newname = body.newname as string | undefined;
       const table = relname(body.relation);
       if (renameType === 'OBJECT_TABLE' && newname) {
-        result.renamedTables.add(newname);
+        result.renamedTables.set(newname, base);
       } else if (renameType === 'OBJECT_COLUMN' && table && newname) {
-        result.renamedColumns.add(`${table}.${newname}`);
+        result.renamedColumns.set(`${table}.${newname}`, base);
       }
     } else if (type === 'CreateStmt' || type === 'CreateTableAsStmt') {
       const table = relname(body.relation);

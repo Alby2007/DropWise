@@ -1,4 +1,5 @@
 node_modules/
+.backtest/
 *.log
 .DS_Store
 dropwise-report.json
