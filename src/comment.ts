@@ -21,7 +21,7 @@ function opHeading(f: Finding): string {
 function findingBlock(f: Finding): string {
   const label = VERDICT_LABEL[f.verdict] ?? f.verdict;
   const lines: string[] = [];
-  lines.push(`#### ${opHeading(f)} — ${f.verdict}`);
+  lines.push(`#### ${opHeading(f)} — ${f.verdict}${f.confidenceNote ? ` — *${f.confidenceNote}*` : ''}`);
   lines.push('');
   lines.push(`**${label}.** ${f.summary}`);
   lines.push('');

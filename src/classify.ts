@@ -172,19 +172,44 @@ export async function classifyDrop(
   const inHead = op.kind === 'drop_table' ? !!headT : !!headT && headT.columns.has(op.column!);
 
   // Schema-derived verdicts must disclose when extraction used the lenient
-  // fallback — hand-verified evidence quality is lower there.
+  // fallback — hand-verified evidence quality is lower there. When the
+  // lenient parse ALSO produced structural warnings (unpaired relations,
+  // ambiguous shapes) the physical mapping itself is suspect, and a
+  // reassuring verdict resting on it must fail closed instead.
   const lenient: string[] = [];
-  if (ctx.baseSchema.value.parser === 'lenient') lenient.push(`schema at base ${short(ctx.base)} extracted leniently (DMMF validation failed)`);
-  if (ctx.headSchema.value.parser === 'lenient') lenient.push('schema at head extracted leniently (DMMF validation failed)');
+  let lenientUnreliable = false;
+  for (const [label, res] of [
+    [`base ${short(ctx.base)}`, ctx.baseSchema],
+    ['head', ctx.headSchema],
+  ] as const) {
+    if (res.value.parser !== 'lenient') continue;
+    lenient.push(`schema at ${label} extracted leniently (DMMF validation failed)`);
+    if (
+      res.value.warnings.some((w) => w !== 'schema failed DMMF validation; extracted with lenient structural parser')
+    ) {
+      lenientUnreliable = true;
+    }
+  }
+  const mkLenient = (verdict: Verdict, evidence: string[], reason?: string): Finding => {
+    if (lenientUnreliable) {
+      return mk('UNKNOWN', [...evidence, ...lenient],
+        'schema required lenient parsing and produced ambiguous relation mapping; the schema diff cannot be relied on');
+    }
+    const f = mk(verdict, evidence, reason);
+    if (lenient.length) {
+      f.confidenceNote = 'lower confidence — schema extracted with the lenient fallback parser (Prisma DMMF validation failed)';
+    }
+    return f;
+  };
 
   if (inBase && !inHead) {
-    return mk('SAME_PR_REMOVAL', [
+    return mkLenient('SAME_PR_REMOVAL', [
       `Prisma schema diff against base commit ${short(ctx.base)} and head schema`,
       ...lenient,
     ]);
   }
   if (inBase && inHead) {
-    return mk('UNKNOWN', [`${noun} dropped in SQL but still declared in the head Prisma schema`],
+    return mkLenient('UNKNOWN', [`${noun} dropped in SQL but still declared in the head Prisma schema`],
       'schema and migration disagree');
   }
 
@@ -197,13 +222,13 @@ export async function classifyDrop(
         ? m.ops.adds.some((a) => a.table === op.table && a.column === op.column)
         : m.ops.creates.some((c) => c.table === op.table);
     if (added) {
-      return mk('NO_PRIOR_SCHEMA_EVIDENCE', [
+      return mkLenient('NO_PRIOR_SCHEMA_EVIDENCE', [
         `${noun} added in ${m.name} and dropped in ${migration.name} within this pull request`,
       ]);
     }
   }
   if (inHead) {
-    return mk('UNKNOWN', [
+    return mkLenient('UNKNOWN', [
       `${noun} absent from base schema but declared in head schema; dropped in SQL with no adding migration found in this pull request`,
     ], 'schema and migration disagree');
   }
@@ -217,7 +242,7 @@ export async function classifyDrop(
       ? history.columnAdds.get(key)
       : history.tableCreates.get(op.table);
   if (hit) {
-    return mk('PRIOR_SCHEMA_REMOVAL', [
+    return mkLenient('PRIOR_SCHEMA_REMOVAL', [
       `absent from base schema at ${short(ctx.base)}; added by migration ${hit.migration} (commit ${short(hit.commit)})`,
       ...lenient,
     ]);
@@ -225,7 +250,7 @@ export async function classifyDrop(
   if (history.incomplete.length > 0) {
     return mk('UNKNOWN', [], `history search incomplete: ${history.incomplete[0]}${history.incomplete.length > 1 ? ` (+${history.incomplete.length - 1} more)` : ''}`);
   }
-  return mk('NO_PRIOR_SCHEMA_EVIDENCE', [
+  return mkLenient('NO_PRIOR_SCHEMA_EVIDENCE', [
     `${history.filesSearched} migration file(s) in git history searched under ${history.pathsSearched.join(', ')}; no declaration of ${key} found`,
     ...lenient,
   ]);

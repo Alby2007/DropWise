@@ -30,6 +30,9 @@ export interface Finding {
   /** Reason string; required for UNKNOWN */
   reason?: string;
   recommendation: string;
+  /** Set when the evidence behind this verdict is weaker than usual —
+   *  rendered beside the verdict so it cannot be buried in warnings. */
+  confidenceNote?: string;
 }
 
 export interface MigrationReport {

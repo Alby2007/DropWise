@@ -200,6 +200,78 @@ describe('merge-base comparison', () => {
   });
 });
 
+describe('lenient-parse confidence', () => {
+  it('lenient parse with ambiguous relation warnings downgrades a reassuring verdict to UNKNOWN', async () => {
+    // tags Tag[] has no opposite relation field on Tag: DMMF rejects, the
+    // lenient parser keeps it but cannot pair the relation — ambiguous.
+    const broken = (withLegacy: boolean) =>
+      schema(`model Doc {
+  id     Int    @id
+  ${withLegacy ? 'legacy String\n  ' : ''}tags   Tag[]
+}
+
+model Tag {
+  id Int @id
+}`);
+    const repo = track(
+      buildRepo([
+        {
+          files: {
+            'prisma/schema.prisma': broken(true),
+            ...mig('20240101_init', 'CREATE TABLE "Doc" ("id" SERIAL PRIMARY KEY, "legacy" TEXT);'),
+          },
+        },
+        {
+          files: {
+            'prisma/schema.prisma': broken(false),
+            ...mig('20240102_drop', 'ALTER TABLE "Doc" DROP COLUMN "legacy";'),
+          },
+        },
+      ]),
+    );
+    const report = await analyzeRepo({ cwd: repo.dir, base: repo.commits[0], head: repo.commits[1] });
+    const findings = report.migrations.flatMap((m) => m.findings);
+    expect(verdictsOf(findings)).toEqual(['UNKNOWN']);
+    expect(findings[0].reason).toMatch(/lenient/i);
+  });
+
+  it('lenient parse without ambiguity keeps the verdict but marks it lower confidence', async () => {
+    // duplicate model block: DMMF rejects, lenient merges cleanly — no
+    // structural ambiguity, so the diff evidence is still usable.
+    const dup = (withLegacy: boolean) =>
+      schema(`model Doc {
+  id     Int    @id
+  ${withLegacy ? 'legacy String' : 'unused String?'}
+}
+
+model Doc {
+  id Int @id
+}`);
+    const repo = track(
+      buildRepo([
+        {
+          files: {
+            'prisma/schema.prisma': dup(true),
+            ...mig('20240101_init', 'CREATE TABLE "Doc" ("id" SERIAL PRIMARY KEY, "legacy" TEXT);'),
+          },
+        },
+        {
+          files: {
+            'prisma/schema.prisma': schema('model Doc {\n  id Int @id\n}'),
+            ...mig('20240102_drop', 'ALTER TABLE "Doc" DROP COLUMN "legacy";'),
+          },
+        },
+      ]),
+    );
+    const report = await analyzeRepo({ cwd: repo.dir, base: repo.commits[0], head: repo.commits[1] });
+    const findings = report.migrations.flatMap((m) => m.findings);
+    expect(verdictsOf(findings)).toEqual(['SAME_PR_REMOVAL']);
+    expect(findings[0].confidenceNote).toMatch(/lenient/i);
+    // and it is rendered beside the verdict, not buried
+    expect(renderComment(report)).toContain('lower confidence');
+  });
+});
+
 describe('zero-downtime-deploys setting', () => {
   it('changes recommended action wording, not the verdict', async () => {
     const commits = [
