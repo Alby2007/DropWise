@@ -29,6 +29,7 @@ export interface PhysicalSchema {
 interface DmmfField {
   name: string;
   kind: string;
+  type?: string;
   isList?: boolean;
   dbName?: string | null;
   relationName?: string;
@@ -116,6 +117,7 @@ export function lenientParse(text: string): { datamodel: { models: DmmfModel[] }
       const field: DmmfField = {
         name: fname,
         kind: isObject ? 'object' : 'scalar',
+        type: ftype,
         isList: list,
         dbName: mapM ? mapM[1] : null,
         relationFromFields: /fields\s*:/.test(rest) ? ['_'] : [],
@@ -132,6 +134,29 @@ export function lenientParse(text: string): { datamodel: { models: DmmfModel[] }
   }
 
   if (models.size === 0) return null;
+
+  // Pair un-named relation sides: a list field `x T[]` on M pairs with the
+  // object field(s) on T of type M. DMMF assigns a shared relationName to
+  // both sides; the lenient parser must do it structurally so m-n detection
+  // downstream can tell a real implicit relation (two list sides) from an
+  // ordinary one-to-many (one list side + one FK side).
+  for (const m of models.values()) {
+    for (const f of m.fields) {
+      if (f.kind !== 'object' || !f.isList || !f.type) continue;
+      const target = models.get(f.type);
+      if (!target) continue;
+      const counterparts = target.fields.filter(
+        (g) => g.kind === 'object' && g.type === m.name,
+      );
+      const named = f.relationName
+        ? counterparts.filter((g) => !g.relationName || g.relationName === f.relationName)
+        : counterparts;
+      if (named.length !== 1) continue;
+      const rel = f.relationName ?? named[0].relationName ?? [m.name, f.type].sort().join('To');
+      f.relationName = rel;
+      named[0].relationName = rel;
+    }
+  }
   return { datamodel: { models: [...models.values()] } };
 }
 
@@ -176,16 +201,20 @@ export function toPhysicalSchema(parsed: ParsedSchema): PhysicalSchema {
     tables.set(tableName, table);
   }
 
-  // Implicit many-to-many join tables. An implicit relation has both sides
-  // marked isList with no explicit FK fields; Prisma names the table _<relationName>.
+  // Implicit many-to-many join tables. An implicit relation has BOTH sides
+  // marked isList with no explicit FK fields; Prisma names the table
+  // _<relationName>. An ordinary one-to-many has exactly one list side (the
+  // other side carries the FK fields) — group all object fields by relation
+  // name so the two cases are distinguishable.
   const relations = new Map<string, { model: string; field: DmmfField }[]>();
   for (const model of datamodel.models) {
     for (const f of model.fields) {
-      if (f.kind !== 'object' || !f.isList) continue;
-      if ((f.relationFromFields?.length ?? 0) > 0 || (f.relationToFields?.length ?? 0) > 0) continue;
+      if (f.kind !== 'object') continue;
       const key = f.relationName ?? '';
       if (!key) {
-        warnings.push(`list relation ${model.name}.${f.name} has no relation name; implicit join table cannot be derived`);
+        if (f.isList) {
+          warnings.push(`list relation ${model.name}.${f.name} has no relation name; implicit join table cannot be derived`);
+        }
         continue;
       }
       const sides = relations.get(key) ?? [];
@@ -193,17 +222,34 @@ export function toPhysicalSchema(parsed: ParsedSchema): PhysicalSchema {
       relations.set(key, sides);
     }
   }
+  const hasFk = (f: DmmfField): boolean =>
+    (f.relationFromFields?.length ?? 0) > 0 || (f.relationToFields?.length ?? 0) > 0;
   for (const [relName, sides] of relations) {
-    if (sides.length !== 2) {
+    const listNoFk = sides.filter((s) => s.field.isList && !hasFk(s.field));
+    if (sides.length === 2 && listNoFk.length === 2) {
+      if (sides[0].model === sides[1].model) {
+        warnings.push(`self relation "${relName}" maps to implicit join table _${relName}; A/B direction is ambiguous`);
+      }
+      tables.set(`_${relName}`, {
+        name: `_${relName}`,
+        columns: new Set(['A', 'B']),
+        implicit: true,
+      });
+      continue;
+    }
+    if (listNoFk.length === 0) continue; // no potential join-table side
+    if (sides.length > 2 || listNoFk.length > 1) {
       warnings.push(`relation "${relName}" has ${sides.length} side(s); implicit join table _${relName} may be ambiguous`);
       continue;
     }
-    const table: PhysicalTable = {
-      name: `_${relName}`,
-      columns: new Set(['A', 'B']),
-      implicit: true,
-    };
-    tables.set(table.name, table);
+    // exactly one unmatched list side — could be an implicit m-n whose
+    // opposite side is missing (lenient-parsed schemas) or the parser did
+    // not pair the names. Warn: join-table existence cannot be confirmed.
+    if (sides.length === 1) {
+      warnings.push(`relation "${relName}" has an unmatched list side; implicit join table _${relName} cannot be confirmed`);
+    }
+    // otherwise sides=2 with one list side + one scalar-bearing side:
+    // an ordinary one-to-many — no warning.
   }
 
   return { tables, warnings, parser: parsed.parser };
